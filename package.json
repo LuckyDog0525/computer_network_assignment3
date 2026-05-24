@@ -1,0 +1,29 @@
+{
+  "name": "computer_network_assignment3",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/LuckyDog0525/computer_network_assignment3#readme",
+  "bugs": {
+    "url": "https://github.com/LuckyDog0525/computer_network_assignment3/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LuckyDog0525/computer_network_assignment3.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "lint": "eslint . --fix",
+    "start": "node src/index.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.9.1",
+    "eslint": "^10.4.0",
+    "globals": "^17.6.0",
+    "jiti": "^2.7.0",
+    "typescript-eslint": "^8.59.4"
+  }
+}
