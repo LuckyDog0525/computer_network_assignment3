@@ -350,12 +350,16 @@ class SessionManager {
   );
 
   invite(userId: string): boolean;
-  acceptInvite(from: string): void;
+  receiveInvite(from: string, members: string[]): boolean;
+  acceptInvite(from: string): boolean;
+  rejectInvite(from: string): boolean;
   handleInviteAccepted(from: string): void;
+  handleInviteRejected(from: string): void;
   sendMessage(message: string): boolean;
   leave(): void;
   removeMember(userId: string): void;
   members(): string[];
+  pendingInvites(): string[];
 }
 ```
 
@@ -363,11 +367,18 @@ class SessionManager {
 
 - `invite(userId)`
   - peer 연결 확인
-  - session에 user 추가
   - `INVITE` packet 전송
+- `receiveInvite(from, members)`
+  - 초대를 pending invite 목록에 저장
+  - 아직 session에는 참여하지 않음
 - `acceptInvite(from)`
+  - pending invite가 있을 때만 동작
+  - 이미 다른 session에 참여 중이면 기존 session에 `SESSION_LEAVE`를 먼저 전송하고 session을 비움
   - session에 from 추가
   - `INVITE_ACCEPT` 전송
+- `rejectInvite(from)`
+  - pending invite 제거
+  - `INVITE_REJECT` 전송
 - `sendMessage(message)`
   - session member 전체에게 `SESSION_CHAT` 전송
 - `leave()`

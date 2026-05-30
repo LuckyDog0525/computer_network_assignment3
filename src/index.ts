@@ -462,6 +462,10 @@ class SessionManager {
     }
 
     this._pendingIncomingInvites.delete(from);
+    if (!this._session.isEmpty()) {
+      this.leave();
+    }
+
     this._session.addMember(from);
     for (const member of members) {
       if (member !== this._myId && member !== from) {
