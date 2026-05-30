@@ -344,10 +344,13 @@ class PeerRegistry {
     this._peers.delete(userId);
   }
 
-  public removeIfMatches(userId: string, connection: TcpPeerConnection): void {
+  public removeIfMatches(userId: string, connection: TcpPeerConnection): boolean {
     if (this._peers.get(userId) === connection) {
       this._peers.delete(userId);
+      return true;
     }
+
+    return false;
   }
 
   public get(userId: string): TcpPeerConnection | null {
@@ -415,6 +418,7 @@ class SessionManager {
   private readonly _myId: string;
   private readonly _session: Session;
   private readonly _peers: PeerRegistry;
+  private readonly _pendingIncomingInvites = new Map<string, string[]>();
 
   public constructor(myId: string, session: Session, peers: PeerRegistry) {
     this._myId = myId;
@@ -431,22 +435,51 @@ class SessionManager {
       return false;
     }
 
-    this._session.addMember(userId);
     return this._peers.send(userId, "INVITE", {
       from: this._myId,
-      members: this._session.members().filter((member) => member !== userId),
+      members: this._session.members(),
     });
   }
 
-  public acceptInvite(from: string, members: string[]): void {
+  public receiveInvite(from: string, members: string[]): boolean {
+    if (from === this._myId || this._peers.get(from) === null) {
+      return false;
+    }
+
+    this._pendingIncomingInvites.set(
+      from,
+      members.filter((member) => {
+        return member !== this._myId && member !== from;
+      }),
+    );
+    return true;
+  }
+
+  public acceptInvite(from: string): boolean {
+    const members = this._pendingIncomingInvites.get(from);
+    if (members === undefined) {
+      return false;
+    }
+
+    this._pendingIncomingInvites.delete(from);
     this._session.addMember(from);
     for (const member of members) {
-      if (member !== this._myId) {
+      if (member !== this._myId && member !== from) {
         this._session.addMember(member);
       }
     }
 
-    this._peers.send(from, "INVITE_ACCEPT", { from: this._myId });
+    return this._peers.send(from, "INVITE_ACCEPT", { from: this._myId });
+  }
+
+  public rejectInvite(from: string): boolean {
+    if (!this._pendingIncomingInvites.has(from)) {
+      return false;
+    }
+
+    this._pendingIncomingInvites.delete(from);
+    this._peers.send(from, "INVITE_REJECT", { from: this._myId });
+    return true;
   }
 
   public handleInviteAccepted(from: string): void {
@@ -459,6 +492,10 @@ class SessionManager {
     if (from !== this._myId) {
       this._session.addMember(from);
     }
+  }
+
+  public handleInviteRejected(from: string): void {
+    this._session.removeMember(from);
   }
 
   public sendMessage(message: string): boolean {
@@ -485,6 +522,10 @@ class SessionManager {
 
   public members(): string[] {
     return this._session.members();
+  }
+
+  public pendingInvites(): string[] {
+    return [...this._pendingIncomingInvites.keys()];
   }
 }
 
@@ -733,7 +774,11 @@ class PeerProtocolHandler {
     this._sessionManager = sessionManager;
   }
 
-  public attach(connection: TcpPeerConnection, initialPeerId: string | null): void {
+  public attach(
+    connection: TcpPeerConnection,
+    initialPeerId: string | null,
+    onPeerReady: (peerId: string) => void,
+  ): void {
     let peerId = initialPeerId;
 
     if (peerId !== null) {
@@ -743,11 +788,17 @@ class PeerProtocolHandler {
     connection.onPacket((packet) => {
       if (packet.type === "PEER_HELLO") {
         peerId = this._handlePeerHello(connection, packet.body);
+        if (peerId !== null) {
+          onPeerReady(peerId);
+        }
         return;
       }
 
       if (packet.type === "PEER_HELLO_ACK") {
         peerId = this._handlePeerHelloAck(connection, packet.body);
+        if (peerId !== null) {
+          onPeerReady(peerId);
+        }
         return;
       }
 
@@ -763,6 +814,11 @@ class PeerProtocolHandler {
 
       if (packet.type === "INVITE_ACCEPT") {
         this._handleInviteAccepted(packet.body);
+        return;
+      }
+
+      if (packet.type === "INVITE_REJECT") {
+        this._handleInviteRejected(packet.body);
         return;
       }
 
@@ -791,9 +847,11 @@ class PeerProtocolHandler {
 
     connection.onClose(() => {
       if (peerId !== null) {
-        this._peers.removeIfMatches(peerId, connection);
-        this._sessionManager.removeMember(peerId);
-        console.log(`peer disconnected: ${peerId}`);
+        const removed = this._peers.removeIfMatches(peerId, connection);
+        if (removed) {
+          this._sessionManager.removeMember(peerId);
+          console.log(`peer disconnected: ${peerId}`);
+        }
       }
     });
 
@@ -843,8 +901,13 @@ class PeerProtocolHandler {
       return;
     }
 
-    this._sessionManager.acceptInvite(from, getMemberIds(body));
-    console.log(`session invite accepted from ${from}`);
+    const received = this._sessionManager.receiveInvite(from, getMemberIds(body));
+    if (!received) {
+      console.log(`ignored session invite from ${from}`);
+      return;
+    }
+
+    console.log(`session invite from ${from}. use /accept ${from} or /reject ${from}`);
   }
 
   private _handleInviteAccepted(body: unknown): void {
@@ -856,6 +919,17 @@ class PeerProtocolHandler {
 
     this._sessionManager.handleInviteAccepted(from);
     console.log(`${from} joined the session`);
+  }
+
+  private _handleInviteRejected(body: unknown): void {
+    const from = getFrom(body);
+    if (from === null) {
+      console.error("invalid INVITE_REJECT body");
+      return;
+    }
+
+    this._sessionManager.handleInviteRejected(from);
+    console.log(`${from} rejected the session invite`);
   }
 
   private _handleSessionChat(body: unknown): void {
@@ -900,6 +974,7 @@ class UserNode {
   private readonly _session = new Session();
   private readonly _sessionManager: SessionManager;
   private readonly _peerProtocolHandler: PeerProtocolHandler;
+  private readonly _pendingInvites = new Set<string>();
 
   public constructor(loginServerPort: number, me: OnlineUser) {
     this._me = me;
@@ -912,7 +987,9 @@ class UserNode {
   public start(): void {
     this._peerServer.listen(
       (connection) => {
-        this._peerProtocolHandler.attach(connection, null);
+        this._peerProtocolHandler.attach(connection, null, (peerId) => {
+          this._flushPendingInvite(peerId);
+        });
       },
       () => {
         console.log(`peer server listening on ${this._me.ip}:${this._me.port}`);
@@ -941,12 +1018,36 @@ class UserNode {
     return this._sessionManager.members();
   }
 
+  public listPendingInvites(): string[] {
+    return this._sessionManager.pendingInvites();
+  }
+
   public invite(userId: string): boolean {
+    if (this._peers.get(userId) === null) {
+      const user = this._onlineUsers.get(userId);
+      if (user === null) {
+        return false;
+      }
+
+      this._pendingInvites.add(userId);
+      this._connectPeer(user);
+      console.log(`connecting to peer before invite: ${userId}`);
+      return true;
+    }
+
     return this._sessionManager.invite(userId);
   }
 
   public sendSessionMessage(message: string): boolean {
     return this._sessionManager.sendMessage(message);
+  }
+
+  public acceptInvite(userId: string): boolean {
+    return this._sessionManager.acceptInvite(userId);
+  }
+
+  public rejectInvite(userId: string): boolean {
+    return this._sessionManager.rejectInvite(userId);
   }
 
   public leaveSession(): void {
@@ -987,7 +1088,6 @@ class UserNode {
 
       this._onlineUsers.upsert(user);
       console.log(`user joined: ${user.id} ${user.ip}:${user.port}`);
-      this._connectPeer(user);
     });
 
     this._loginClient.onUserLeft((user) => {
@@ -1017,7 +1117,24 @@ class UserNode {
     });
 
     const connection = new TcpPeerConnection(socket);
-    this._peerProtocolHandler.attach(connection, user.id);
+    this._peerProtocolHandler.attach(connection, user.id, (peerId) => {
+      this._flushPendingInvite(peerId);
+    });
+  }
+
+  private _flushPendingInvite(peerId: string): void {
+    if (!this._pendingInvites.has(peerId)) {
+      return;
+    }
+
+    this._pendingInvites.delete(peerId);
+    const invited = this._sessionManager.invite(peerId);
+    if (invited) {
+      console.log(`invited: ${peerId}`);
+      return;
+    }
+
+    console.log(`cannot invite after peer connection: ${peerId}`);
   }
 }
 
@@ -1062,6 +1179,11 @@ class CommandLoop {
         continue;
       }
 
+      if (trimmedLine === "/invites") {
+        console.log("pending invites:", this._node.listPendingInvites());
+        continue;
+      }
+
       if (trimmedLine === "/leave") {
         this._node.leaveSession();
         console.log("left session");
@@ -1070,6 +1192,16 @@ class CommandLoop {
 
       if (trimmedLine.startsWith("/invite ")) {
         this._handleInvite(trimmedLine);
+        continue;
+      }
+
+      if (trimmedLine.startsWith("/accept ")) {
+        this._handleAccept(trimmedLine);
+        continue;
+      }
+
+      if (trimmedLine.startsWith("/reject ")) {
+        this._handleReject(trimmedLine);
         continue;
       }
 
@@ -1089,7 +1221,9 @@ class CommandLoop {
   }
 
   private _printHelp(): void {
-    console.log("commands: /users, /peers, /invite userId, /members, /send message, /leave, /quit");
+    console.log(
+      "commands: /users, /peers, /invite userId, /invites, /accept userId, /reject userId, /members, /send message, /leave, /quit",
+    );
     console.log("direct message: @userId message");
   }
 
@@ -1119,7 +1253,39 @@ class CommandLoop {
       return;
     }
 
-    console.log(`invited: ${userId}`);
+    console.log(`invite requested: ${userId}`);
+  }
+
+  private _handleAccept(line: string): void {
+    const userId = line.slice("/accept ".length).trim();
+    if (userId === "") {
+      console.log("use: /accept userId");
+      return;
+    }
+
+    const accepted = this._node.acceptInvite(userId);
+    if (!accepted) {
+      console.log(`no pending invite from: ${userId}`);
+      return;
+    }
+
+    console.log(`accepted invite from: ${userId}`);
+  }
+
+  private _handleReject(line: string): void {
+    const userId = line.slice("/reject ".length).trim();
+    if (userId === "") {
+      console.log("use: /reject userId");
+      return;
+    }
+
+    const rejected = this._node.rejectInvite(userId);
+    if (!rejected) {
+      console.log(`no pending invite from: ${userId}`);
+      return;
+    }
+
+    console.log(`rejected invite from: ${userId}`);
   }
 
   private _handleSessionMessage(line: string): void {

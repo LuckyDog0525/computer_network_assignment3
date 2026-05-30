@@ -126,9 +126,9 @@ SessionManager
 ```ts
 type Headers = Record<string, string>;
 
-type Packet = {
-  type: string;
-  headers: Headers;
+type Packet = { 
+  type: string;   #packet-type
+  headers: Headers; 
   body: unknown;
 };
 
@@ -146,11 +146,11 @@ type OnlineUsersBody = {
   users: OnlineUser[];
 };
 
-type UserEventBody = {
+type UserEventBody = { //상태가 바뀌었음을 알려주려고
   user: OnlineUser;
 };
 
-type PeerHelloBody = {
+type PeerHelloBody = { 
   user: OnlineUser;
 };
 
@@ -183,10 +183,10 @@ Message format:
 
 ```text
 Type: SESSION_CHAT
-Content-Type: application/json
-Content-Length: 42
+Content-Type: application/json #header
+Content-Length: 42 #header
 
-{"from":"alice","message":"hello everyone"}
+{"from":"alice","message":"hello everyone"} #body
 ```
 
 Interface:
@@ -475,7 +475,6 @@ INVITE
 INVITE_ACCEPT
 SESSION_CHAT
 SESSION_LEAVE
-SESSION_MEMBER_JOINED
 ERROR
 ```
 
@@ -638,16 +637,6 @@ Bob PeerProtocolHandler
   <- INVITE
   -> SessionManager.acceptInvite("alice")
   -> PeerRegistry.send("alice", "INVITE_ACCEPT", { from: "bob" })
-```
-
-기존 session에 여러 명이 있는 경우:
-
-```text
-Alice invites Chris
-  -> INVITE body includes current members
-  -> Chris adds Alice and existing members
-  <- INVITE_ACCEPT from Chris
-  -> Alice broadcasts SESSION_MEMBER_JOINED to existing members
 ```
 
 ### 9.6 Session Broadcast Flow
